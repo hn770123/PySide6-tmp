@@ -10,6 +10,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt
 
+try:
+    from auth import authenticate
+except ImportError:
+    from src.auth import authenticate
+
 class LoginWindow(QWidget):
     """
     ログイン画面を表示するクラスです。
@@ -91,5 +96,8 @@ class LoginWindow(QWidget):
             QMessageBox.warning(self, "エラー", "ユーザー名とパスワードを入力してください。")
             return
 
-        # 成功とみなしてシグナルを発行
-        self.login_successful.emit()
+        if authenticate(username, password):
+            # 成功した場合はシグナルを発行
+            self.login_successful.emit()
+        else:
+            QMessageBox.warning(self, "エラー", "ユーザー名またはパスワードが間違っています。")
