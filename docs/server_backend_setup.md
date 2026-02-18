@@ -24,7 +24,7 @@
 ## 2. 推奨構成
 
 *   **サーバー側 (Backend)**: Python (FastAPI), Uvicorn, PostgreSQL/MySQL
-*   **クライアント側 (Frontend)**: PySide6, Requests (HTTPクライアント)
+*   **クライアント側 (Frontend)**: PySide6 (QtNetworkモジュール)
 
 ---
 
@@ -82,38 +82,76 @@
 ### ステップ3: クライアント（PySide6）の改修
 
 クライアント側のコードを変更し、直接DBを触るのではなく、APIを呼び出すようにします。
+PySide6では、標準のPythonライブラリ（`requests`など）ではなく、Qtフレームワークに統合された **`QtNetwork`** モジュールを使用することを推奨します。
 
 1.  **ライブラリの追加**:
-    `requests` ライブラリを導入します。
-    ```bash
-    pip install requests
-    ```
+    PySide6標準の機能を使用するため、追加のライブラリインストールは不要です。
 
-2.  **`src/database.py` / `src/auth.py` の書き換え**:
-    直接SQLを実行していた部分を、APIリクエストに置き換えます。
+2.  **`src/auth.py` などの書き換え**:
+    QtNetworkは **非同期** で動作するため、関数の戻り値で結果を返すのではなく、**Signal（シグナル）** を使用して結果を通知する設計に変更する必要があります。
 
-    **例: src/auth.py の改修イメージ**
+    **例: src/auth_manager.py の実装イメージ**
     ```python
-    import requests
+    import json
+    from PySide6.QtCore import QObject, Signal, Slot, QUrl
+    from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
     API_BASE_URL = "http://your-server-address:8000"
 
-    def authenticate(username, password):
-        """
-        サーバーAPIを叩いて認証を行う
-        """
-        try:
-            response = requests.post(
-                f"{API_BASE_URL}/login",
-                json={"username": username, "password": password},
-                timeout=5
-            )
-            if response.status_code == 200:
-                return True
-            return False
-        except requests.exceptions.RequestException as e:
-            print(f"Network error: {e}")
-            return False
+    class AuthManager(QObject):
+        # 認証結果を通知するシグナル (成功可否, メッセージ)
+        login_finished = Signal(bool, str)
+
+        def __init__(self):
+            super().__init__()
+            self.manager = QNetworkAccessManager(self)
+            # レスポンス受信時のシグナル接続
+            self.manager.finished.connect(self.handle_response)
+
+        def login(self, username, password):
+            url = QUrl(f"{API_BASE_URL}/login")
+            request = QNetworkRequest(url)
+            request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+
+            data = json.dumps({"username": username, "password": password}).encode('utf-8')
+            # 非同期でPOSTリクエスト送信
+            self.manager.post(request, data)
+
+        @Slot(QNetworkReply)
+        def handle_response(self, reply):
+            if reply.error() == QNetworkReply.NetworkError.NoError:
+                # 成功時の処理
+                self.login_finished.emit(True, "Login successful")
+            else:
+                # エラー時の処理
+                self.login_finished.emit(False, reply.errorString())
+
+            reply.deleteLater()
+    ```
+
+    **呼び出し側の変更イメージ (Windowクラス内)**:
+    ```python
+    def on_login_button_clicked(self):
+        username = self.ui.username_input.text()
+        password = self.ui.password_input.text()
+
+        # 認証マネージャーのインスタンス化（または依存注入）
+        self.auth_manager = AuthManager()
+        self.auth_manager.login_finished.connect(self.on_login_finished)
+
+        # ローディング表示などを開始
+        self.ui.status_label.setText("ログイン中...")
+
+        # 非同期ログイン実行
+        self.auth_manager.login(username, password)
+
+    @Slot(bool, str)
+    def on_login_finished(self, success, message):
+        if success:
+            self.ui.status_label.setText("成功！")
+            # 画面遷移処理
+        else:
+            self.ui.status_label.setText(f"失敗: {message}")
     ```
 
 ### ステップ4: デプロイ
@@ -133,14 +171,14 @@
 
 ## 4. 注意点
 
-*   **エラーハンドリング**: ネットワークエラー（接続不可、タイムアウト）が発生する可能性があるため、PySide6側で適切に `try-except` し、ユーザーに通知する仕組みが必要です。
-*   **セキュリティ**: 通信経路は必ずSSL/TLS (HTTPS) で暗号化してください。
-*   **非同期処理**: APIリクエストは時間がかかる場合があるため、UIスレッド（メインスレッド）で実行すると画面がフリーズします。`QThread` や `QRunnable` を使用して、別スレッドで実行することを強く推奨します。
+*   **非同期処理とUI**: `QtNetwork` は非同期で動作するため、リクエスト送信時にUIをフリーズさせません。`requests` などのブロッキングライブラリを使用する場合に必要となる `QThread` などのスレッド管理が不要になります。ただし、レスポンスが返ってくるまでの間、ユーザーが重複操作を行わないよう、ボタンを無効化するなどのUI制御が必要です。
+*   **SSL/TLS**: 通信経路は必ずSSL/TLS (HTTPS) で暗号化してください。QtNetworkはOpenSSLをサポートしています。
+*   **エラーハンドリング**: サーバーダウンやネットワーク切断などのエラーは `QNetworkReply.error()` で検知し、適切にユーザーに通知してください。
 
 ---
 
 ## 5. 参考資料
 
 *   **FastAPI Documentation**: https://fastapi.tiangolo.com/ja/
-*   **SQLAlchemy**: https://www.sqlalchemy.org/
-*   **PySide6 Threading**: https://doc.qt.io/qtforpython/overviews/thread.html
+*   **PySide6 QtNetwork**: https://doc.qt.io/qtforpython/PySide6/QtNetwork/index.html
+*   **QNetworkAccessManager**: https://doc.qt.io/qtforpython/PySide6/QtNetwork/QNetworkAccessManager.html
